@@ -387,3 +387,37 @@ func TestWithTimeout(t *testing.T) {
 		t.Errorf("timeout = %v, want %v", c.timeout, 30*time.Second)
 	}
 }
+
+func TestInvalidIP_IsStripped(t *testing.T) {
+	var received payload
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		json.Unmarshal(body, &received)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer ts.Close()
+
+	c := New("test-key", WithEndpoint(ts.URL))
+	_ = c.Track("auth.login.success", TrackOptions{IP: "not-an-ip"})
+
+	if received.IP != "" {
+		t.Errorf("expected IP to be stripped for invalid value, got %q", received.IP)
+	}
+}
+
+func TestValidIP_IsKept(t *testing.T) {
+	var received payload
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		json.Unmarshal(body, &received)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer ts.Close()
+
+	c := New("test-key", WithEndpoint(ts.URL))
+	_ = c.Track("auth.login.success", TrackOptions{IP: "192.168.1.1"})
+
+	if received.IP != "192.168.1.1" {
+		t.Errorf("expected IP %q to be kept, got %q", "192.168.1.1", received.IP)
+	}
+}

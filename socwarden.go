@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"runtime"
@@ -86,7 +87,7 @@ func (c *Client) TrackWithContext(ctx context.Context, event string, opts TrackO
 		p.ActorEmail = opts.ActorEmail
 	}
 	if opts.IP != "" {
-		p.IP = opts.IP
+		p.IP = sanitizeIP(opts.IP)
 	}
 	if opts.UserAgent != "" {
 		p.UserAgent = opts.UserAgent
@@ -128,7 +129,7 @@ func (c *Client) TrackDataWithContext(ctx context.Context, event string, data ma
 		p.ActorEmail = v
 	}
 	if v, ok := data["ip"].(string); ok {
-		p.IP = v
+		p.IP = sanitizeIP(v)
 	}
 	if v, ok := data["user_agent"].(string); ok {
 		p.UserAgent = v
@@ -181,6 +182,15 @@ func (c *Client) buildPayload(ctx context.Context, event string) payload {
 	}
 
 	return p
+}
+
+// sanitizeIP returns ip if it is a valid IPv4/IPv6 address, otherwise "".
+// Matches the ingestor's validate:"omitempty,ip" constraint.
+func sanitizeIP(ip string) string {
+	if net.ParseIP(ip) == nil {
+		return ""
+	}
+	return ip
 }
 
 func (c *Client) send(p payload) error {
