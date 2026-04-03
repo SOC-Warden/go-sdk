@@ -2,8 +2,6 @@ package socwarden
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"net"
 	"net/http"
 	"strings"
@@ -62,16 +60,9 @@ func Middleware(client *Client) func(http.Handler) http.Handler {
 				rc.RequestID = id
 			}
 
-			// Merge browser context from X-SOCWarden-Context header
-			// (base64-encoded JSON sent by the browser SDK in relay mode).
-			if hdr := r.Header.Get("X-SOCWarden-Context"); hdr != "" {
-				if decoded, err := base64.StdEncoding.DecodeString(hdr); err == nil {
-					var bc browserContext
-					if json.Unmarshal(decoded, &bc) == nil {
-						rc.Browser = bc
-					}
-				}
-			}
+			// D1 FIX: X-SOCWarden-Context header removed — trusting arbitrary HTTP headers
+			// allows any client to spoof server-side metadata. Browser context from
+			// incoming request headers is no longer merged into server-side context.
 
 			ctx := context.WithValue(r.Context(), reqCtxKey, rc)
 			next.ServeHTTP(w, r.WithContext(ctx))

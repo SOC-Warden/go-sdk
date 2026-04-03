@@ -5,13 +5,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"testing"
 	"time"
 )
-
-// eventTypeRegex mirrors the ingestor's validation regex.
-var eventTypeRegex = regexp.MustCompile(`^[a-z][a-z0-9]{0,29}(\.[a-z][a-z0-9_]{0,29}){1,3}$`)
 
 // ingestorAllowedFields lists every top-level JSON key the ingestor accepts
 // in POST /v1/events (EventPayload struct in ingestor/internal/model/event.go).

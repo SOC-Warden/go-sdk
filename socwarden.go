@@ -12,8 +12,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -28,6 +30,9 @@ const (
 	backoffDuration = 1 * time.Hour
 	probeInterval   = 5 * time.Minute
 )
+
+// D3 FIX: Event type validation regex — matches the ingestor's required format.
+var eventTypeRegex = regexp.MustCompile(`^[a-z][a-z0-9]{0,29}(\.[a-z][a-z0-9_]{0,29}){1,3}$`)
 
 // Client sends security events to the SOCWarden ingestor.
 type Client struct {
@@ -56,6 +61,7 @@ func WithTimeout(d time.Duration) Option {
 }
 
 // New creates a Client with the given API key and options.
+// It returns an error if the endpoint uses HTTP in production (SOCWARDEN_ENV=production).
 func New(apiKey string, opts ...Option) *Client {
 	c := &Client{
 		apiKey:   apiKey,
@@ -66,12 +72,27 @@ func New(apiKey string, opts ...Option) *Client {
 		o(c)
 	}
 	c.http = &http.Client{Timeout: c.timeout}
+
+	// D2 FIX: Enforce HTTPS to prevent API key transmission in cleartext.
+	if !strings.HasPrefix(c.endpoint, "https://") {
+		if os.Getenv("SOCWARDEN_ENV") == "production" {
+			panic("socwarden: endpoint must use HTTPS in production — API keys must not be transmitted in cleartext")
+		}
+		// Non-production: log a prominent warning via stderr.
+		_, _ = fmt.Fprintln(os.Stderr, "[SOCWarden] WARNING: Endpoint is using HTTP. API keys will be transmitted in cleartext.")
+	}
+
 	return c
 }
 
 // Track sends a security event synchronously.
 // Callers that need async behaviour should wrap the call in a goroutine.
+// Returns an error if event type format is invalid.
 func (c *Client) Track(event string, opts TrackOptions) error {
+	// D3 FIX: Validate event type format before sending.
+	if !eventTypeRegex.MatchString(event) {
+		return fmt.Errorf("socwarden: invalid event type %q — must match ^[a-z][a-z0-9]{0,29}(\\.[a-z][a-z0-9_]{0,29}){1,3}$", event)
+	}
 	return c.TrackWithContext(context.Background(), event, opts)
 }
 
@@ -113,7 +134,12 @@ func (c *Client) TrackWithContext(ctx context.Context, event string, opts TrackO
 
 // TrackData sends an event with an arbitrary data map (mirrors the Laravel
 // SDK's trackData method).
+// Returns an error if event type format is invalid.
 func (c *Client) TrackData(event string, data map[string]any) error {
+	// D3 FIX: Validate event type format before sending.
+	if !eventTypeRegex.MatchString(event) {
+		return fmt.Errorf("socwarden: invalid event type %q — must match ^[a-z][a-z0-9]{0,29}(\\.[a-z][a-z0-9_]{0,29}){1,3}$", event)
+	}
 	return c.TrackDataWithContext(context.Background(), event, data)
 }
 

@@ -314,7 +314,11 @@ func TestDefaultEndpoint(t *testing.T) {
 	}
 }
 
-func TestBrowserContextMerge(t *testing.T) {
+// TestBrowserContextHeaderIgnored verifies that the X-SOCWarden-Context header
+// is NOT trusted or merged into event context (security fix D1 — header spoofing
+// prevention). Attackers must not be able to poison server-side metadata by
+// sending a crafted header value.
+func TestBrowserContextHeaderIgnored(t *testing.T) {
 	var received payload
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -325,19 +329,14 @@ func TestBrowserContextMerge(t *testing.T) {
 
 	c := New("test-key", WithEndpoint(ts.URL))
 
-	browserCtx := map[string]any{
-		"timezone":       "America/New_York",
-		"language":       "en-US",
-		"platform":       "MacIntel",
-		"screen":         "1920x1080",
-		"viewport":       "1440x900",
-		"color_depth":    float64(24),
-		"cookie_enabled": true,
-		"do_not_track":   false,
-		"cpu_cores":      float64(8),
+	// Craft a spoofed context header an attacker might send to poison telemetry.
+	spoofed := map[string]any{
+		"hostname": "attacker-controlled-host",
+		"pid":      float64(1),
+		"ip":       "1.2.3.4",
 	}
-	browserJSON, _ := json.Marshal(browserCtx)
-	encoded := base64.StdEncoding.EncodeToString(browserJSON)
+	spoofedJSON, _ := json.Marshal(spoofed)
+	encoded := base64.StdEncoding.EncodeToString(spoofedJSON)
 
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		err := c.TrackWithContext(r.Context(), "page.view", TrackOptions{})
@@ -351,33 +350,21 @@ func TestBrowserContextMerge(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
 	req.RemoteAddr = "10.0.0.1:12345"
-	req.Header.Set("X-SOCWarden-Context", encoded)
+	req.Header.Set("X-SOCWarden-Context", encoded) // must be ignored
 
 	rr := httptest.NewRecorder()
 	mw.ServeHTTP(rr, req)
 
-	if received.Context == nil {
-		t.Fatal("context is nil")
+	// The request must succeed.
+	if rr.Code != http.StatusOK {
+		t.Fatalf("handler status = %d, want 200", rr.Code)
 	}
 
-	browser := received.Context.Browser
-	if browser == nil {
-		t.Fatal("browser context is nil, expected it to be populated from X-SOCWarden-Context header")
-	}
-	if browser["timezone"] != "America/New_York" {
-		t.Errorf("browser.timezone = %v, want %q", browser["timezone"], "America/New_York")
-	}
-	if browser["language"] != "en-US" {
-		t.Errorf("browser.language = %v, want %q", browser["language"], "en-US")
-	}
-	if browser["platform"] != "MacIntel" {
-		t.Errorf("browser.platform = %v, want %q", browser["platform"], "MacIntel")
-	}
-	if browser["screen"] != "1920x1080" {
-		t.Errorf("browser.screen = %v, want %q", browser["screen"], "1920x1080")
-	}
-	if browser["cpu_cores"] != float64(8) {
-		t.Errorf("browser.cpu_cores = %v, want %v", browser["cpu_cores"], float64(8))
+	// The spoofed browser context must NOT appear in the event payload.
+	if received.Context != nil && received.Context.Browser != nil {
+		if received.Context.Browser["hostname"] == "attacker-controlled-host" {
+			t.Error("X-SOCWarden-Context header was trusted — attacker can spoof server metadata")
+		}
 	}
 }
 
