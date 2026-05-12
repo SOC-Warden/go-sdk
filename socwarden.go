@@ -24,7 +24,7 @@ const (
 	sdkName    = "socwarden-go"
 	sdkVersion = "1.0.0"
 
-	defaultEndpoint = "https://ingest.socwarden.io"
+	defaultEndpoint = "https://ingest.socwarden.com"
 	defaultTimeout  = 10 * time.Second
 
 	backoffDuration = 1 * time.Hour

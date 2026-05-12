@@ -309,8 +309,8 @@ func TestSanitizeQueryString(t *testing.T) {
 
 func TestDefaultEndpoint(t *testing.T) {
 	c := New("test-key")
-	if c.endpoint != "https://ingest.socwarden.io" {
-		t.Errorf("default endpoint = %q, want %q", c.endpoint, "https://ingest.socwarden.io")
+	if c.endpoint != "https://ingest.socwarden.com" {
+		t.Errorf("default endpoint = %q, want %q", c.endpoint, "https://ingest.socwarden.com")
 	}
 }
 
