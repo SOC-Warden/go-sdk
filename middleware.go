@@ -19,6 +19,11 @@ var sensitiveParams = []string{
 	"token", "key", "password", "secret", "code", "auth", "session", "csrf",
 }
 
+// maxRequestIDLen is the maximum length we accept for X-Request-ID /
+// X-Correlation-ID header values. Values longer than this are truncated to
+// prevent oversized strings being stored in the event payload.
+const maxRequestIDLen = 128
+
 // Middleware returns standard net/http middleware that captures the current
 // request's method, path, remote address, user-agent, query string, referer,
 // origin, content-type, accept-language, request ID, and browser context
@@ -54,9 +59,17 @@ func Middleware(client *Client) func(http.Handler) http.Handler {
 			}
 
 			// Check common request-ID headers.
+			// FIX (unbounded input): truncate to maxRequestIDLen so a crafted
+			// header cannot store arbitrarily large strings in the event payload.
 			if id := r.Header.Get("X-Request-ID"); id != "" {
+				if len(id) > maxRequestIDLen {
+					id = id[:maxRequestIDLen]
+				}
 				rc.RequestID = id
 			} else if id := r.Header.Get("X-Correlation-ID"); id != "" {
+				if len(id) > maxRequestIDLen {
+					id = id[:maxRequestIDLen]
+				}
 				rc.RequestID = id
 			}
 

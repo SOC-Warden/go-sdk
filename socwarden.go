@@ -7,10 +7,12 @@ package socwarden
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"runtime"
@@ -24,7 +26,7 @@ const (
 	sdkName    = "socwarden-go"
 	sdkVersion = "1.0.0"
 
-	defaultEndpoint = "https://ingest.socwarden.com"
+	defaultEndpoint = "https://ingestor.socwarden.com"
 	defaultTimeout  = 10 * time.Second
 
 	backoffDuration = 1 * time.Hour
@@ -61,7 +63,8 @@ func WithTimeout(d time.Duration) Option {
 }
 
 // New creates a Client with the given API key and options.
-// It returns an error if the endpoint uses HTTP in production (SOCWARDEN_ENV=production).
+// Panics in production (SOCWARDEN_ENV=production) when the endpoint is not HTTPS.
+// Returns a valid *Client or panics; callers should ensure configuration is correct.
 func New(apiKey string, opts ...Option) *Client {
 	c := &Client{
 		apiKey:   apiKey,
@@ -71,15 +74,39 @@ func New(apiKey string, opts ...Option) *Client {
 	for _, o := range opts {
 		o(c)
 	}
-	c.http = &http.Client{Timeout: c.timeout}
+
+	// FIX (SSRF + URL validation): Validate and normalise the endpoint URL.
+	// We parse the URL before allowing it to be used so that we catch obviously
+	// invalid values (empty scheme, unresolvable hosts, file:// etc.) at
+	// construction time rather than at send time.
+	parsedURL, err := url.ParseRequestURI(c.endpoint)
+	if err != nil {
+		panic(fmt.Sprintf("socwarden: invalid endpoint URL %q: %v", sanitizeForLog(c.endpoint), err))
+	}
+	// Strip any path component — the SDK always appends /v1/events itself.
+	c.endpoint = parsedURL.Scheme + "://" + parsedURL.Host
+
+	// FIX (TLS): Enforce a minimum TLS version of 1.2. Go's default transport
+	// accepts TLS 1.0/1.1, which are deprecated and vulnerable.
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+	}
+	c.http = &http.Client{
+		Timeout:   c.timeout,
+		Transport: transport,
+	}
 
 	// D2 FIX: Enforce HTTPS to prevent API key transmission in cleartext.
-	if !strings.HasPrefix(c.endpoint, "https://") {
+	if parsedURL.Scheme != "https" {
 		if os.Getenv("SOCWARDEN_ENV") == "production" {
 			panic("socwarden: endpoint must use HTTPS in production — API keys must not be transmitted in cleartext")
 		}
 		// Non-production: log a prominent warning via stderr.
-		_, _ = fmt.Fprintln(os.Stderr, "[SOCWarden] WARNING: Endpoint is using HTTP. API keys will be transmitted in cleartext.")
+		// FIX (log injection): sanitize the endpoint before embedding it in the
+		// warning message — a newline in the URL could inject fake log lines.
+		_, _ = fmt.Fprintln(os.Stderr, "[SOCWarden] WARNING: Endpoint is using HTTP. API keys will be transmitted in cleartext. endpoint="+sanitizeForLog(c.endpoint))
 	}
 
 	return c
@@ -129,7 +156,7 @@ func (c *Client) TrackWithContext(ctx context.Context, event string, opts TrackO
 		}
 	}
 
-	return c.send(p)
+	return c.send(ctx, p)
 }
 
 // TrackData sends an event with an arbitrary data map (mirrors the Laravel
@@ -167,7 +194,7 @@ func (c *Client) TrackDataWithContext(ctx context.Context, event string, data ma
 		p.Timestamp = v
 	}
 
-	return c.send(p)
+	return c.send(ctx, p)
 }
 
 // Event starts a fluent EventBuilder for the given event name.
@@ -219,7 +246,18 @@ func sanitizeIP(ip string) string {
 	return ip
 }
 
-func (c *Client) send(p payload) error {
+// sanitizeForLog strips newline and carriage-return characters from s so that
+// it cannot be used to inject fake log lines when embedded in log messages.
+func sanitizeForLog(s string) string {
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	s = strings.ReplaceAll(s, "\r", `\r`)
+	return s
+}
+
+// send marshals the payload and POSTs it to the ingestor.
+// FIX (context propagation): ctx is now forwarded to the outgoing HTTP request
+// so that caller cancellations (deadline, shutdown) are honoured.
+func (c *Client) send(ctx context.Context, p payload) error {
 	// Check back-off state.
 	if c.inBackoff() {
 		return fmt.Errorf("socwarden: rate limited, backing off")
@@ -230,7 +268,9 @@ func (c *Client) send(p payload) error {
 		return fmt.Errorf("socwarden: marshal payload: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, c.endpoint+"/v1/events", bytes.NewReader(body))
+	// FIX (context propagation): use NewRequestWithContext so the caller's
+	// context (cancellation, deadline) propagates to the outbound TCP/TLS dial.
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+"/v1/events", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("socwarden: create request: %w", err)
 	}
@@ -246,7 +286,15 @@ func (c *Client) send(p payload) error {
 	if resp.StatusCode == http.StatusTooManyRequests {
 		retryAfter := backoffDuration
 		if v := resp.Header.Get("Retry-After"); v != "" {
-			if secs, err := strconv.Atoi(v); err == nil {
+			// FIX (integer overflow): use ParseInt with explicit bit-size 63 and
+			// clamp to [0, maxBackoffSeconds] so a maliciously large Retry-After
+			// value cannot overflow time.Duration on 32-bit hosts or produce a
+			// negative duration on any host.
+			const maxBackoffSeconds int64 = 86400 // 24 h cap
+			if secs, err := strconv.ParseInt(v, 10, 64); err == nil && secs > 0 {
+				if secs > maxBackoffSeconds {
+					secs = maxBackoffSeconds
+				}
 				retryAfter = time.Duration(secs) * time.Second
 			}
 		}

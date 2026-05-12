@@ -117,7 +117,7 @@ client := socwarden.New("your-api-key",
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `WithEndpoint(url)` | `https://ingest.socwarden.com` | Ingestor base URL |
+| `WithEndpoint(url)` | `https://ingestor.socwarden.com` | Ingestor base URL |
 | `WithTimeout(d)` | `10s` | HTTP request timeout |
 
 ## Rate Limit Handling

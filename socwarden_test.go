@@ -1,11 +1,13 @@
 package socwarden
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -309,8 +311,8 @@ func TestSanitizeQueryString(t *testing.T) {
 
 func TestDefaultEndpoint(t *testing.T) {
 	c := New("test-key")
-	if c.endpoint != "https://ingest.socwarden.com" {
-		t.Errorf("default endpoint = %q, want %q", c.endpoint, "https://ingest.socwarden.com")
+	if c.endpoint != "https://ingestor.socwarden.com" {
+		t.Errorf("default endpoint = %q, want %q", c.endpoint, "https://ingestor.socwarden.com")
 	}
 }
 
@@ -406,5 +408,121 @@ func TestValidIP_IsKept(t *testing.T) {
 
 	if received.IP != "192.168.1.1" {
 		t.Errorf("expected IP %q to be kept, got %q", "192.168.1.1", received.IP)
+	}
+}
+
+// TestContextCancellation verifies that a cancelled context causes the outbound
+// HTTP request to be aborted rather than silently ignored (context propagation fix).
+func TestContextCancellation(t *testing.T) {
+	// Use a channel to gate the server response so we can cancel mid-flight.
+	gate := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Block until the test signals us or the client disconnects.
+		select {
+		case <-gate:
+		case <-r.Context().Done():
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer ts.Close()
+	defer close(gate)
+
+	c := New("test-key", WithEndpoint(ts.URL), WithTimeout(5*time.Second))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel immediately so the request should be rejected.
+	cancel()
+
+	err := c.TrackWithContext(ctx, "auth.login.success", TrackOptions{})
+	if err == nil {
+		t.Fatal("expected error from cancelled context, got nil")
+	}
+}
+
+// TestRetryAfterOverflow verifies that an extremely large Retry-After value is
+// clamped to the 24 h cap and does not overflow time.Duration.
+func TestRetryAfterOverflow(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Send a Retry-After that would overflow int32 when multiplied by time.Second.
+		w.Header().Set("Retry-After", "9999999999")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer ts.Close()
+
+	c := New("test-key", WithEndpoint(ts.URL))
+	err := c.Track("test.event.one", TrackOptions{})
+	if err == nil {
+		t.Fatal("expected error on 429, got nil")
+	}
+
+	// The backoff should be capped at 24 h, not some astronomical value.
+	c.mu.RLock()
+	backoff := c.backoffUntil
+	c.mu.RUnlock()
+
+	remaining := time.Until(backoff)
+	const maxExpected = 24*time.Hour + 10*time.Second // small fudge for test timing
+	if remaining > maxExpected {
+		t.Errorf("backoff duration %v exceeds 24h cap", remaining)
+	}
+}
+
+// TestSanitizeForLog verifies that newlines in user-controlled strings cannot
+// inject fake log lines.
+func TestSanitizeForLog(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"normal", "normal"},
+		{"has\nnewline", `has\nnewline`},
+		{"has\rreturn", `has\rreturn`},
+		{"http://evil.com\nFakeHeader: injected", `http://evil.com\nFakeHeader: injected`},
+	}
+	for _, tt := range tests {
+		got := sanitizeForLog(tt.in)
+		if got != tt.want {
+			t.Errorf("sanitizeForLog(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// TestRequestIDTruncation verifies that an oversized X-Request-ID header is
+// truncated to maxRequestIDLen bytes instead of being stored verbatim.
+func TestRequestIDTruncation(t *testing.T) {
+	var received payload
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		json.Unmarshal(body, &received)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer ts.Close()
+
+	c := New("test-key", WithEndpoint(ts.URL))
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = c.TrackWithContext(r.Context(), "api.request.received", TrackOptions{})
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mw := Middleware(c)(inner)
+
+	oversizedID := strings.Repeat("a", maxRequestIDLen+100)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("X-Request-ID", oversizedID)
+
+	rr := httptest.NewRecorder()
+	mw.ServeHTTP(rr, req)
+
+	if received.Context == nil {
+		t.Fatal("context is nil")
+	}
+	got := received.Context.Request.RequestID
+	if len(got) > maxRequestIDLen {
+		t.Errorf("RequestID length %d exceeds maxRequestIDLen %d", len(got), maxRequestIDLen)
+	}
+	if got != oversizedID[:maxRequestIDLen] {
+		t.Errorf("truncated RequestID = %q, want first %d chars of oversizedID", got, maxRequestIDLen)
 	}
 }
