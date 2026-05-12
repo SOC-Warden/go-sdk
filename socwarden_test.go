@@ -526,3 +526,49 @@ func TestRequestIDTruncation(t *testing.T) {
 		t.Errorf("truncated RequestID = %q, want first %d chars of oversizedID", got, maxRequestIDLen)
 	}
 }
+
+// TestTrackWithContext_ValidatesEventType verifies that TrackWithContext rejects
+// invalid event types even when called directly (bypassing Track).
+func TestTrackWithContext_ValidatesEventType(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer ts.Close()
+
+	c := New("test-key", WithEndpoint(ts.URL))
+
+	invalid := []string{"", "UPPERCASE", "no-dots", "1startsdigit.foo", strings.Repeat("a", 31) + ".foo"}
+	for _, ev := range invalid {
+		err := c.TrackWithContext(context.Background(), ev, TrackOptions{})
+		if err == nil {
+			t.Errorf("TrackWithContext(%q) expected error for invalid event type, got nil", ev)
+		}
+	}
+
+	// Valid event type must not error at the validation step.
+	err := c.TrackWithContext(context.Background(), "auth.login.success", TrackOptions{})
+	if err != nil {
+		t.Errorf("TrackWithContext valid event got unexpected error: %v", err)
+	}
+}
+
+// TestTrackDataWithContext_ValidatesEventType verifies that TrackDataWithContext
+// rejects invalid event types even when called directly (bypassing TrackData).
+func TestTrackDataWithContext_ValidatesEventType(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer ts.Close()
+
+	c := New("test-key", WithEndpoint(ts.URL))
+
+	err := c.TrackDataWithContext(context.Background(), "INVALID_EVENT", map[string]any{})
+	if err == nil {
+		t.Error("TrackDataWithContext with invalid event type expected error, got nil")
+	}
+
+	err = c.TrackDataWithContext(context.Background(), "auth.login.success", map[string]any{})
+	if err != nil {
+		t.Errorf("TrackDataWithContext valid event got unexpected error: %v", err)
+	}
+}

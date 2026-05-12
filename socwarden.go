@@ -125,7 +125,12 @@ func (c *Client) Track(event string, opts TrackOptions) error {
 
 // TrackWithContext is like Track but accepts an explicit context, which
 // allows the middleware-captured request data to be included automatically.
+// Returns an error if event type format is invalid.
 func (c *Client) TrackWithContext(ctx context.Context, event string, opts TrackOptions) error {
+	// Validate here too: callers may invoke TrackWithContext directly, bypassing Track.
+	if !eventTypeRegex.MatchString(event) {
+		return fmt.Errorf("socwarden: invalid event type %q — must match ^[a-z][a-z0-9]{0,29}(\\.[a-z][a-z0-9_]{0,29}){1,3}$", event)
+	}
 	p := c.buildPayload(ctx, event)
 
 	if opts.ActorID != "" {
@@ -172,7 +177,12 @@ func (c *Client) TrackData(event string, data map[string]any) error {
 
 // TrackDataWithContext is like TrackData but accepts a context for
 // middleware-captured request data.
+// Returns an error if event type format is invalid.
 func (c *Client) TrackDataWithContext(ctx context.Context, event string, data map[string]any) error {
+	// Validate here too: callers may invoke TrackDataWithContext directly, bypassing TrackData.
+	if !eventTypeRegex.MatchString(event) {
+		return fmt.Errorf("socwarden: invalid event type %q — must match ^[a-z][a-z0-9]{0,29}(\\.[a-z][a-z0-9_]{0,29}){1,3}$", event)
+	}
 	p := c.buildPayload(ctx, event)
 
 	if v, ok := data["actor_id"].(string); ok {
